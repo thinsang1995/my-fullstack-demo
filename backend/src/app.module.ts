@@ -22,7 +22,7 @@ import { TodoModule } from './todo/todo.module';
           ? { socketPath: config.get('DB_HOST') }
           : {},
         autoLoadEntities: true,
-        synchronize: config.get('NODE_ENV') !== 'production',
+        synchronize: true,
       }),
     }),
     TodoModule,

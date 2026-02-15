@@ -145,7 +145,7 @@ import { AppService } from './app.service';
           ? { socketPath: config.get('DB_HOST') }
           : {},
         autoLoadEntities: true,
-        synchronize: config.get('NODE_ENV') !== 'production',
+        synchronize: true, // OK cho demo. Production thật nên dùng TypeORM migrations
       }),
     }),
   ],
@@ -295,6 +295,8 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
 
 FROM node:20-alpine AS runner
@@ -309,6 +311,8 @@ EXPOSE 3000
 ENV PORT=3000
 CMD ["node", "server.js"]
 ```
+
+> **QUAN TRỌNG:** `NEXT_PUBLIC_*` env vars được Next.js inline vào JS bundle lúc **build time**, không phải runtime. Phải dùng `ARG` + `ENV` trong Dockerfile builder stage, và truyền qua `--build-arg` khi build. `--set-env-vars` trên Cloud Run chỉ set runtime env → browser sẽ không nhận được.
 
 ### 5.5 `.dockerignore` (`frontend/.dockerignore`)
 
@@ -375,13 +379,26 @@ Verify: `curl https://api-v1-PROJECT_NUMBER.asia-northeast1.run.app/health`
 
 ### 7.2 Deploy Frontend
 
+> **QUAN TRỌNG:** Không dùng `--source` cho frontend vì `NEXT_PUBLIC_*` cần được truyền lúc **build time** qua `--build-arg`. `--source` không hỗ trợ build args.
+
 ```bash
+# Build image với build-arg
+IMAGE="asia-northeast1-docker.pkg.dev/PROJECT_ID/cloud-run-source-deploy/frontend-v1:latest"
+docker build \
+  --build-arg NEXT_PUBLIC_API_URL=https://api-v1-PROJECT_NUMBER.asia-northeast1.run.app \
+  -t "$IMAGE" \
+  ./frontend
+
+# Push lên Artifact Registry (cần configure docker auth trước)
+gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet
+docker push "$IMAGE"
+
+# Deploy
 gcloud run deploy frontend-v1 \
-  --source ./frontend \
+  --image "$IMAGE" \
   --region asia-northeast1 \
   --project PROJECT_ID \
   --service-account cloudrun-sa@PROJECT_ID.iam.gserviceaccount.com \
-  --set-env-vars "NEXT_PUBLIC_API_URL=https://api-v1-PROJECT_NUMBER.asia-northeast1.run.app" \
   --port 3000 \
   --allow-unauthenticated \
   --quiet
@@ -524,6 +541,8 @@ jobs:
 
 #### `.github/workflows/frontend-deploy.yml`
 
+> **Khác với backend:** Frontend dùng explicit `docker build` + `push` thay vì `--source` để truyền `--build-arg NEXT_PUBLIC_API_URL` lúc build time.
+
 ```yaml
 name: Frontend Blue-Green Deploy
 
@@ -556,14 +575,26 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/cloud-run-source-deploy/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL=${{ secrets.API_URL }} \
+            -t "$IMAGE" \
+            ./frontend
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
       - name: Deploy new revision (no traffic)
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --source ./frontend \
+            --image ${{ env.IMAGE }} \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
             --service-account ${{ env.SERVICE_ACCOUNT }} \
-            --set-env-vars "NEXT_PUBLIC_API_URL=${{ secrets.API_URL }}" \
             --port 3000 \
             --no-traffic \
             --tag green \
@@ -646,6 +677,14 @@ gcloud run services list --region=asia-northeast1 --project=PROJECT_ID
 ### Backend `node_modules` bị commit lên git
 **Nguyên nhân:** NestJS CLI với `--skip-git` không tạo `.gitignore`.
 **Fix:** Tạo `backend/.gitignore` thủ công (xem Step 4.6).
+
+### Backend 500 Internal Server Error khi gọi API entity mới
+**Nguyên nhân:** `synchronize: false` trong production → TypeORM không tự tạo table cho entity mới → query fail.
+**Fix:** Dùng `synchronize: true` cho demo project. Production thật nên dùng TypeORM migrations (`typeorm migration:generate` + `typeorm migration:run`).
+
+### Frontend gọi `localhost:8080` thay vì backend Cloud Run URL
+**Nguyên nhân:** `NEXT_PUBLIC_*` env vars được Next.js inline vào JS bundle lúc **build time**. Dùng `--set-env-vars` trên Cloud Run chỉ set runtime env → browser nhận fallback `http://localhost:8080`.
+**Fix:** Truyền `NEXT_PUBLIC_API_URL` qua Docker `--build-arg` (xem Step 5.4 Dockerfile + Step 8.4 frontend workflow). Không dùng `gcloud run deploy --source` cho frontend.
 
 ### Frontend thành git submodule
 **Nguyên nhân:** `create-next-app` tự tạo `.git` trong `frontend/`.

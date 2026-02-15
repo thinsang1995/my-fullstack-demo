@@ -21,13 +21,24 @@ gcloud run deploy api-v1 \
 
 ## Deploy Frontend
 
+> **Note:** Không dùng `--source` vì `NEXT_PUBLIC_*` cần truyền lúc build time qua `--build-arg`.
+
 ```bash
+# Build + push image
+IMAGE="asia-northeast1-docker.pkg.dev/project-63c91435-bad0-420c-859/cloud-run-source-deploy/frontend-v1:latest"
+gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet
+docker build \
+  --build-arg NEXT_PUBLIC_API_URL=https://api-v1-956379709284.asia-northeast1.run.app \
+  -t "$IMAGE" \
+  ./frontend
+docker push "$IMAGE"
+
+# Deploy
 gcloud run deploy frontend-v1 \
-  --source ./frontend \
+  --image "$IMAGE" \
   --region asia-northeast1 \
   --project project-63c91435-bad0-420c-859 \
   --service-account cloudrun-sa@project-63c91435-bad0-420c-859.iam.gserviceaccount.com \
-  --set-env-vars "NEXT_PUBLIC_API_URL=https://api-v1-<HASH>.asia-northeast1.run.app" \
   --port 3000 \
   --allow-unauthenticated
 ```
