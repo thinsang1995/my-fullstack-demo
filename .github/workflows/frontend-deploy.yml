@@ -24,7 +24,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Google Auth
-        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -33,7 +32,7 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Deploy to Cloud Run (new revision, no traffic)
+      - name: Deploy new revision (no traffic)
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
             --source ./frontend \
@@ -46,22 +45,22 @@ jobs:
             --tag green \
             --quiet
 
-      - name: Health Check on green revision
+      - name: Health Check green revision
         run: |
-          GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --project ${{ env.PROJECT_ID }} \
-            --format='value(status.traffic.url)' | grep green || echo "")
-          if [ -n "$GREEN_URL" ]; then
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL" || echo "000")
-            echo "Health check status: $STATUS"
-            if [ "$STATUS" != "200" ]; then
-              echo "Health check failed!"
-              exit 1
-            fi
+          sleep 10
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} --project ${{ env.PROJECT_ID }} \
+            --format='value(status.url)')
+          GREEN_URL=$(echo "$SERVICE_URL" | sed 's|https://|https://green---|')
+          echo "Checking: $GREEN_URL"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL" || echo "000")
+          echo "Health check status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed!"
+            exit 1
           fi
 
-      - name: Migrate traffic to green
+      - name: Migrate traffic to latest
         run: |
           gcloud run services update-traffic ${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} \
