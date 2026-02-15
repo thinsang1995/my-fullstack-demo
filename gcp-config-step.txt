@@ -1,0 +1,19 @@
+brew install --cask google-cloud-sdk
+
+# Thêm vào ~/.zshrc hoặc ~/.bashrc
+source /opt/homebrew/share/google-cloud-sdk/completion.zsh.inc
+source /opt/homebrew/share/google-cloud-sdk/path.zsh.inc
+
+# Reload shell
+source ~/.zshrc
+
+gcloud version
+
+# Khởi tạo project (lần đầu)
+gcloud init
+
+gcloud auth list
+
+
+gcloud config set project YOUR_PROJECT_ID
+gcloud projects describe YOUR_PROJECT_ID

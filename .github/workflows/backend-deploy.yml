@@ -1,0 +1,74 @@
+name: Backend Blue-Green Deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ["backend/**"]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: project-63c91435-bad0-420c-859
+  REGION: asia-northeast1
+  SERVICE_NAME: api-v1
+  SERVICE_ACCOUNT: cloudrun-sa@project-63c91435-bad0-420c-859.iam.gserviceaccount.com
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run (new revision, no traffic)
+        id: deploy
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --source ./backend \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --service-account ${{ env.SERVICE_ACCOUNT }} \
+            --add-cloudsql-instances ${{ env.PROJECT_ID }}:${{ env.REGION }}:demo-db \
+            --set-env-vars "DB_HOST=/cloudsql/${{ env.PROJECT_ID }}:${{ env.REGION }}:demo-db,DB_USER=demo-user,DB_NAME=demo_prod,NODE_ENV=production" \
+            --set-secrets "DB_PASS=db-password:latest" \
+            --port 8080 \
+            --no-traffic \
+            --tag green \
+            --quiet
+          echo "GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --project ${{ env.PROJECT_ID }} --format='value(status.traffic[0].url)')" >> $GITHUB_OUTPUT
+
+      - name: Health Check on green revision
+        run: |
+          GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --format='value(status.traffic.url)' | grep green || echo "")
+          if [ -n "$GREEN_URL" ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL/health" || echo "000")
+            echo "Health check status: $STATUS"
+            if [ "$STATUS" != "200" ]; then
+              echo "Health check failed!"
+              exit 1
+            fi
+          fi
+
+      - name: Migrate traffic to green
+        run: |
+          gcloud run services update-traffic ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --to-latest \
+            --quiet

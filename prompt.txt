@@ -1,0 +1,22 @@
+"🚀 SETUP FULLSTACK GCP PROJECT theo architecture:
+
+PROJECT: project-63c91435-bad0-420c-859 (asia-northeast1)
+Cloud SQL: demo-db (POSTGRES_16, /cloudsql/project-63c91435-bad0-420c-859:asia-northeast1:demo-db)
+Service Account: cloudrun-sa@project-63c91435-bad0-420c-859.iam.gserviceaccount.com
+DB: demo-db / DemoPass123! / demo_prod
+
+Hãy thực hiện theo /Users/sang/Desktop/learn-ai/my-fullstack-demo/Hướng dẫn build Fullstack GCP.md
+
+Cần generate ĐẦY ĐỦ:
+
+1. FOLDER STRUCTURE (frontend/ + backend/)
+2. BACKEND: nest new → TypeORM config → Cloud SQL proxy → Dockerfile
+3. FRONTEND: create-next-app → API client → Dockerfile  
+4. GITHUB ACTIONS: 2 files (.github/workflows/blue-green.yml) cho FE+BE
+5. MANUAL DEPLOY COMMANDS (gcloud run deploy) để test trước CI/CD
+6. ENVIRONMENT VARIABLES đúng format
+
+Execute ngay các gcloud commands cần thiết nếu thiếu API/permissions.
+
+Current gcloud config: $(gcloud config get-value project)
+Cloud SQL status: $(gcloud sql instances describe demo-db --format='value(state)')"

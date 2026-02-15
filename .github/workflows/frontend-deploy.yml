@@ -1,0 +1,70 @@
+name: Frontend Blue-Green Deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ["frontend/**"]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: project-63c91435-bad0-420c-859
+  REGION: asia-northeast1
+  SERVICE_NAME: frontend-v1
+  SERVICE_ACCOUNT: cloudrun-sa@project-63c91435-bad0-420c-859.iam.gserviceaccount.com
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run (new revision, no traffic)
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --source ./frontend \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --service-account ${{ env.SERVICE_ACCOUNT }} \
+            --set-env-vars "NEXT_PUBLIC_API_URL=${{ secrets.API_URL }}" \
+            --port 3000 \
+            --no-traffic \
+            --tag green \
+            --quiet
+
+      - name: Health Check on green revision
+        run: |
+          GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --format='value(status.traffic.url)' | grep green || echo "")
+          if [ -n "$GREEN_URL" ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL" || echo "000")
+            echo "Health check status: $STATUS"
+            if [ "$STATUS" != "200" ]; then
+              echo "Health check failed!"
+              exit 1
+            fi
+          fi
+
+      - name: Migrate traffic to green
+        run: |
+          gcloud run services update-traffic ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --to-latest \
+            --quiet
