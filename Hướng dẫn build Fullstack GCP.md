@@ -77,12 +77,22 @@ gcloud iam service-accounts create cloudrun-sa \
 ```bash
 SA_EMAIL="cloudrun-sa@PROJECT_ID.iam.gserviceaccount.com"
 
+# Roles cơ bản cho Cloud Run + Cloud SQL
 for ROLE in roles/run.developer roles/cloudsql.client roles/artifactregistry.reader; do
   gcloud projects add-iam-policy-binding PROJECT_ID \
     --member="serviceAccount:$SA_EMAIL" \
     --role="$ROLE"
 done
+
+# Roles bổ sung (cần cho CI/CD deploy từ GitHub Actions)
+for ROLE in roles/storage.admin roles/artifactregistry.writer roles/cloudbuild.builds.editor roles/run.admin roles/iam.serviceAccountUser roles/serviceusage.serviceUsageConsumer; do
+  gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="$ROLE"
+done
 ```
+
+> **Lưu ý:** Các roles bổ sung cần cho GitHub Actions CI/CD. Nếu chỉ deploy thủ công bằng `gcloud` (dùng account owner), có thể bỏ qua phần roles bổ sung.
 
 ### 3.3 Gán permissions cho default Compute SA (cần cho Cloud Build deploy)
 
@@ -191,7 +201,37 @@ ENV PORT=8080
 CMD ["node", "dist/main.js"]
 ```
 
-### 4.6 `.dockerignore` (`backend/.dockerignore`)
+### 4.6 `.gitignore` (`backend/.gitignore`)
+
+> **QUAN TRỌNG:** NestJS CLI (`--skip-git`) không tạo `.gitignore`. Phải tạo thủ công, nếu không `node_modules` và `dist` sẽ bị commit lên repo.
+
+```
+# compiled output
+/dist
+/node_modules
+
+# logs
+logs
+*.log
+npm-debug.log*
+
+# env files
+.env*
+
+# OS
+.DS_Store
+
+# tests
+/coverage
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+```
+
+### 4.7 `.dockerignore` (`backend/.dockerignore`)
 
 ```
 node_modules
@@ -280,11 +320,43 @@ node_modules
 .env*
 ```
 
-## Step 6: Deploy lên Cloud Run
+## Step 6: Git Init + Push to GitHub
+
+### 6.1 Root `.gitignore`
+
+Tạo file `.gitignore` ở thư mục gốc project:
+
+```
+node_modules
+dist
+.next
+.env*
+*.log
+.claude
+```
+
+### 6.2 Init + Push
+
+```bash
+git init
+git branch -M main
+
+# Xóa nested .git từ create-next-app (nếu không dùng --skip-git)
+rm -rf frontend/.git
+
+git add .
+git commit -m "Initial setup: NestJS backend + Next.js frontend on GCP Cloud Run"
+git remote add origin git@github.com:YOUR_USERNAME/YOUR_REPO.git
+git push -u origin main
+```
+
+> **Lưu ý:** `create-next-app` tự tạo `.git` trong `frontend/`. Phải xóa trước khi commit, nếu không frontend sẽ thành git submodule.
+
+## Step 7: Deploy lên Cloud Run
 
 > **Chạy từ thư mục gốc project** (chứa cả backend/ và frontend/).
 
-### 6.1 Deploy Backend
+### 7.1 Deploy Backend
 
 ```bash
 gcloud run deploy api-v1 \
@@ -301,7 +373,7 @@ gcloud run deploy api-v1 \
 
 Verify: `curl https://api-v1-PROJECT_NUMBER.asia-northeast1.run.app/health`
 
-### 6.2 Deploy Frontend
+### 7.2 Deploy Frontend
 
 ```bash
 gcloud run deploy frontend-v1 \
@@ -315,9 +387,72 @@ gcloud run deploy frontend-v1 \
   --quiet
 ```
 
-## Step 7: GitHub Actions CI/CD (Blue-Green)
+## Step 8: GitHub Actions CI/CD (Blue-Green) với Workload Identity Federation
 
-### `.github/workflows/backend-deploy.yml`
+### 8.1 Tạo Workload Identity Federation (WIF) trên GCP
+
+> WIF cho phép GitHub Actions authenticate với GCP **không cần SA key file** (an toàn hơn).
+
+```bash
+# Tạo Workload Identity Pool
+gcloud iam workload-identity-pools create github-pool \
+  --location=global \
+  --display-name="GitHub Actions Pool" \
+  --project=PROJECT_ID
+
+# Tạo OIDC Provider cho GitHub
+# Thay YOUR_USERNAME/YOUR_REPO bằng GitHub repo thực tế
+gcloud iam workload-identity-pools providers create-oidc github-provider \
+  --location=global \
+  --workload-identity-pool=github-pool \
+  --display-name="GitHub Provider" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="assertion.repository=='YOUR_USERNAME/YOUR_REPO'" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --project=PROJECT_ID
+
+# Cho phép GitHub repo impersonate cloudrun-sa
+gcloud iam service-accounts add-iam-policy-binding \
+  cloudrun-sa@PROJECT_ID.iam.gserviceaccount.com \
+  --project=PROJECT_ID \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/YOUR_USERNAME/YOUR_REPO"
+```
+
+> **QUAN TRỌNG:** `--attribute-condition` bắt buộc phải có, nếu không sẽ bị lỗi `INVALID_ARGUMENT`. Condition này giới hạn chỉ repo của bạn mới được authenticate.
+
+### 8.2 Lấy WIF Provider path
+
+```bash
+gcloud iam workload-identity-pools providers describe github-provider \
+  --location=global \
+  --workload-identity-pool=github-pool \
+  --project=PROJECT_ID \
+  --format="value(name)"
+# Output: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+```
+
+### 8.3 Set GitHub Secrets
+
+Cần cài `gh` CLI (`brew install gh`) và đăng nhập (`gh auth login`).
+
+```bash
+# WIF Provider full path (lấy từ bước 8.2)
+gh secret set WIF_PROVIDER --repo YOUR_USERNAME/YOUR_REPO \
+  --body "projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+
+# Service Account email
+gh secret set WIF_SERVICE_ACCOUNT --repo YOUR_USERNAME/YOUR_REPO \
+  --body "cloudrun-sa@PROJECT_ID.iam.gserviceaccount.com"
+
+# Backend API URL (cho frontend)
+gh secret set API_URL --repo YOUR_USERNAME/YOUR_REPO \
+  --body "https://api-v1-PROJECT_NUMBER.REGION.run.app"
+```
+
+### 8.4 Workflow files
+
+#### `.github/workflows/backend-deploy.yml`
 
 ```yaml
 name: Backend Blue-Green Deploy
@@ -359,8 +494,7 @@ jobs:
             --project ${{ env.PROJECT_ID }} \
             --service-account ${{ env.SERVICE_ACCOUNT }} \
             --add-cloudsql-instances ${{ env.PROJECT_ID }}:${{ env.REGION }}:demo-db \
-            --set-env-vars "DB_HOST=/cloudsql/${{ env.PROJECT_ID }}:${{ env.REGION }}:demo-db,DB_USER=demo-user,DB_NAME=demo_prod,NODE_ENV=production" \
-            --set-secrets "DB_PASS=db-password:latest" \
+            --set-env-vars "DB_HOST=/cloudsql/${{ env.PROJECT_ID }}:${{ env.REGION }}:demo-db,DB_USER=demo-user,DB_PASS=DemoPass123!,DB_NAME=demo_prod,NODE_ENV=production" \
             --port 8080 \
             --no-traffic \
             --tag green \
@@ -368,31 +502,109 @@ jobs:
 
       - name: Health Check green revision
         run: |
-          GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+          sleep 10
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} --project ${{ env.PROJECT_ID }} \
-            --format='value(status.traffic.url)' | grep green || echo "")
-          if [ -n "$GREEN_URL" ]; then
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL/health")
-            if [ "$STATUS" != "200" ]; then echo "Health check failed!"; exit 1; fi
+            --format='value(status.url)')
+          GREEN_URL=$(echo "$SERVICE_URL" | sed 's|https://|https://green---|')
+          echo "Checking: $GREEN_URL/health"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL/health" || echo "000")
+          echo "Health check status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed!"
+            exit 1
           fi
 
-      - name: Migrate traffic to green
+      - name: Migrate traffic to latest
         run: |
           gcloud run services update-traffic ${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} --project ${{ env.PROJECT_ID }} \
             --to-latest --quiet
 ```
 
-### `.github/workflows/frontend-deploy.yml`
+#### `.github/workflows/frontend-deploy.yml`
 
-Tương tự backend, đổi:
-- `SERVICE_NAME: frontend-v1`
-- `--source ./frontend`
-- `--port 3000`
-- Bỏ `--add-cloudsql-instances` và DB env vars
-- Thêm `--set-env-vars "NEXT_PUBLIC_API_URL=${{ secrets.API_URL }}"`
+```yaml
+name: Frontend Blue-Green Deploy
 
-## Step 8: Monitoring & Logs
+on:
+  push:
+    branches: [main]
+    paths: ["frontend/**"]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: PROJECT_ID
+  REGION: asia-northeast1
+  SERVICE_NAME: frontend-v1
+  SERVICE_ACCOUNT: cloudrun-sa@PROJECT_ID.iam.gserviceaccount.com
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy new revision (no traffic)
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --source ./frontend \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --service-account ${{ env.SERVICE_ACCOUNT }} \
+            --set-env-vars "NEXT_PUBLIC_API_URL=${{ secrets.API_URL }}" \
+            --port 3000 \
+            --no-traffic \
+            --tag green \
+            --quiet
+
+      - name: Health Check green revision
+        run: |
+          sleep 10
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} --project ${{ env.PROJECT_ID }} \
+            --format='value(status.url)')
+          GREEN_URL=$(echo "$SERVICE_URL" | sed 's|https://|https://green---|')
+          echo "Checking: $GREEN_URL"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL" || echo "000")
+          echo "Health check status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed!"
+            exit 1
+          fi
+
+      - name: Migrate traffic to latest
+        run: |
+          gcloud run services update-traffic ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} --project ${{ env.PROJECT_ID }} \
+            --to-latest --quiet
+```
+
+### 8.5 Blue-Green Flow
+
+```
+1. Push code vào backend/** hoặc frontend/** trên main
+2. GitHub Actions authenticate qua WIF (không cần SA key)
+3. Deploy revision mới với --no-traffic --tag green
+4. Health check green revision URL
+5. OK → migrate 100% traffic sang revision mới
+6. Fail → traffic vẫn ở revision cũ (zero-downtime)
+```
+
+Trigger thủ công: `gh workflow run "Backend Blue-Green Deploy" --repo YOUR_USERNAME/YOUR_REPO --ref main`
+
+## Step 9: Monitoring & Logs
 
 ```bash
 # Xem logs
@@ -423,19 +635,49 @@ gcloud run services list --region=asia-northeast1 --project=PROJECT_ID
 **Nguyên nhân:** Thiếu flag `--yes` để auto-accept defaults.
 **Fix:** Thêm `--yes` vào lệnh `npx create-next-app@latest`.
 
+### CI/CD lỗi `PERMISSION_DENIED: roles/serviceusage.serviceUsageConsumer`
+**Nguyên nhân:** `cloudrun-sa` thiếu quyền `serviceusage.services.use` khi chạy `gcloud run deploy --source` từ GitHub Actions.
+**Fix:** Gán `roles/serviceusage.serviceUsageConsumer` cho `cloudrun-sa` (đã bao gồm trong Step 3.2).
+
+### CI/CD lỗi WIF `INVALID_ARGUMENT` khi tạo OIDC provider
+**Nguyên nhân:** Thiếu `--attribute-condition` khi tạo provider. GCP yêu cầu bắt buộc.
+**Fix:** Thêm `--attribute-condition="assertion.repository=='YOUR_USERNAME/YOUR_REPO'"`.
+
+### Backend `node_modules` bị commit lên git
+**Nguyên nhân:** NestJS CLI với `--skip-git` không tạo `.gitignore`.
+**Fix:** Tạo `backend/.gitignore` thủ công (xem Step 4.6).
+
+### Frontend thành git submodule
+**Nguyên nhân:** `create-next-app` tự tạo `.git` trong `frontend/`.
+**Fix:** `rm -rf frontend/.git` trước khi `git add`.
+
 ---
 
 ## Checklist
 
 ```
+--- GCP Infrastructure ---
 [ ] APIs enabled (run, sqladmin, cloudbuild, artifactregistry)
-[ ] Cloud SQL instance (POSTGRES_16, db-f1-micro, enterprise)
+[ ] Cloud SQL instance (POSTGRES_16, db-f1-micro, --edition=enterprise)
 [ ] Database + user created
-[ ] Service Account cloudrun-sa + 3 roles
+[ ] Service Account cloudrun-sa + roles (run.developer, cloudsql.client, artifactregistry.reader)
+[ ] cloudrun-sa CI/CD roles (storage.admin, artifactregistry.writer, cloudbuild.builds.editor, run.admin, iam.serviceAccountUser, serviceusage.serviceUsageConsumer)
 [ ] Compute SA + storage.admin + artifactregistry.writer
-[ ] Backend: scaffold + typeorm + health endpoint + Dockerfile
-[ ] Frontend: scaffold + standalone + axios + Dockerfile
+
+--- Application ---
+[ ] Backend: scaffold + typeorm + health endpoint + Dockerfile + .gitignore + .dockerignore
+[ ] Frontend: scaffold + standalone output + axios + Dockerfile + .dockerignore
+[ ] Root .gitignore created
+[ ] frontend/.git removed
+
+--- Deploy ---
 [ ] Backend deployed → /health returns 200
 [ ] Frontend deployed → returns 200
-[ ] GitHub Actions workflows (optional)
+
+--- CI/CD ---
+[ ] WIF Pool + OIDC Provider created (with attribute-condition)
+[ ] cloudrun-sa → workloadIdentityUser binding
+[ ] GitHub secrets: WIF_PROVIDER, WIF_SERVICE_ACCOUNT, API_URL
+[ ] Backend workflow passed (manual dispatch test)
+[ ] Frontend workflow passed (manual dispatch test)
 ```
