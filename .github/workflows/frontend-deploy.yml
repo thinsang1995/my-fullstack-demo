@@ -32,14 +32,26 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/cloud-run-source-deploy/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL=${{ secrets.API_URL }} \
+            -t "$IMAGE" \
+            ./frontend
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
       - name: Deploy new revision (no traffic)
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --source ./frontend \
+            --image ${{ env.IMAGE }} \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
             --service-account ${{ env.SERVICE_ACCOUNT }} \
-            --set-env-vars "NEXT_PUBLIC_API_URL=${{ secrets.API_URL }}" \
             --port 3000 \
             --no-traffic \
             --tag green \
